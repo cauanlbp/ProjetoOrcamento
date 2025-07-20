@@ -4,14 +4,16 @@ import json
 import requests
 import subprocess
 import urllib.request
+import tempfile
 from datetime import datetime
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QTextEdit, QDateEdit, QPushButton,
     QGroupBox, QFormLayout, QTableWidget, QTableWidgetItem,
-    QMessageBox, QHeaderView, QAbstractItemView, QFileDialog
+    QMessageBox, QHeaderView, QAbstractItemView, QFileDialog,
+    QDialog
 )
-from PyQt6.QtCore import Qt, QDate, QRegularExpression, QSize
+from PyQt6.QtCore import Qt, QDate, QRegularExpression, QSize, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QRegularExpressionValidator, QIcon, QPixmap
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
@@ -25,12 +27,20 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from PIL import Image as PilImage
 
+# --- Constantes e Paths ---
 CURRENT_VERSION = "v1.5"
-
 CONFIG_FILE = os.path.expanduser("~/.orcamento_config.json")
 LOGO_PNG_PATH = os.path.join(os.path.abspath("."), "logo.png")
 LOGO_ICO_PATH = os.path.join(os.path.abspath("."), "logo.ico")
 
+# Github info para launcher
+GITHUB_OWNER = "cauanlbp"
+GITHUB_REPO = "ProjetoOrcamento"
+LOCAL_VERSION = "1.5"
+INSTALLER_URL_TEMPLATE = "https://github.com/{owner}/{repo}/releases/download/v{version}/orcamentos.exe"
+APP_EXE_NAME = "orcamento.exe"
+
+# --- Funções auxiliares ---
 def resource_path(relative_path):
     try:
         base_path = sys._MEIPASS
@@ -50,12 +60,10 @@ def load_config():
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 config = json.load(f)
-                # Validação mínima
                 if "pdf_save_folder" in config and os.path.isdir(config["pdf_save_folder"]):
                     return config
         except Exception:
             pass
-    # Retorna padrão
     return {
         "titulo": "Delicatessen trigo de ouro",
         "texto1": "(79) 3015-0626 | (79) 99820-3756 | (79) 99978-0044 | @trigodeouro_",
@@ -214,11 +222,11 @@ def gerar_orcamento_pdf(nome_arquivo, items, cliente_info, config):
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
         ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
         ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('ALIGN', (0, 1), (0, -1), 'CENTER'),  # Unid
-        ('ALIGN', (1, 1), (1, -1), 'CENTER'),  # Desc centralizado
-        ('ALIGN', (2, 1), (2, -1), 'CENTER'),  # Valor Unid
-        ('ALIGN', (3, 1), (3, -1), 'CENTER'),  # Total
-        ('ALIGN', (2, 0), (3, 0), 'CENTER'),  # Cabeçalho Valor Unid e Total centralizados
+        ('ALIGN', (0, 1), (0, -1), 'CENTER'),
+        ('ALIGN', (1, 1), (1, -1), 'CENTER'),
+        ('ALIGN', (2, 1), (2, -1), 'CENTER'),
+        ('ALIGN', (3, 1), (3, -1), 'CENTER'),
+        ('ALIGN', (2, 0), (3, 0), 'CENTER'),
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
         ('FONTSIZE', (0, 0), (-1, 0), 12),
         ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
@@ -249,7 +257,7 @@ def gerar_orcamento_pdf(nome_arquivo, items, cliente_info, config):
         for _ in range(linhas_faltando):
             dados.append(["", "", "", ""])
 
-        tabela = Table(dados, colWidths=[50, 230, 100, 100])  # largura total 480
+        tabela = Table(dados, colWidths=[50, 230, 100, 100])
         tabela.setStyle(estilo_tabela)
         elementos.append(tabela)
         elementos.append(Spacer(1, 10))
@@ -286,47 +294,170 @@ def gerar_orcamento_pdf(nome_arquivo, items, cliente_info, config):
     print(f"PDF '{nome_arquivo}' gerado com sucesso.")
 
 
-def get_latest_release_info():
-    # Troque SEU_USUARIO e SEU_REPOSITORIO abaixo
-    url = "https://api.github.com/repos/cauanlbp/ProjetoOrcamento/releases/latest"
+# --- Código do Launcher integrado ---
+class VersionCheckThread(QThread):
+    finished_check = pyqtSignal(str)
+
+    def run(self):
+        url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
+        try:
+            with urllib.request.urlopen(url) as response:
+                data = json.load(response)
+                latest_version = data["tag_name"].lstrip("v")
+                self.finished_check.emit(latest_version)
+        except Exception as e:
+            print(f"Erro ao obter última versão: {e}")
+            self.finished_check.emit(None)
+
+def download_installer(version):
+    url = INSTALLER_URL_TEMPLATE.format(owner=GITHUB_OWNER, repo=GITHUB_REPO, version=version)
+    tmp_dir = tempfile.gettempdir()
+    installer_path = os.path.join(tmp_dir, f"orcamentos_v{version}.exe")
     try:
-        resp = requests.get(url)
-        if resp.status_code == 200:
-            data = resp.json()
-            tag_name = data["tag_name"]
-            assets = data["assets"]
-            for asset in assets:
-                if asset["name"].endswith(".exe"):
-                    download_url = asset["browser_download_url"]
-                    return tag_name, download_url
+        urllib.request.urlretrieve(url, installer_path)
+        return installer_path
     except Exception as e:
-        print(f"Erro ao buscar release: {e}")
-    return None, None
+        print(f"Erro ao baixar instalador: {e}")
+        return None
 
+def run_installer_silently(installer_path):
+    CREATE_NO_WINDOW = 0x08000000
+    try:
+        subprocess.run([installer_path, "/verysilent", "/norestart"],
+                       check=True,
+                       creationflags=CREATE_NO_WINDOW)
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"Erro ao executar instalador: {e}")
+        return False
 
-def check_update_and_apply():
-    latest_version, installer_url = get_latest_release_info()
-    if latest_version and latest_version > CURRENT_VERSION:
-        print(f"Nova versão disponível: {latest_version}")
+def run_app():
+    exe_path = os.path.join(os.getcwd(), APP_EXE_NAME)
+    if not os.path.isfile(exe_path):
+        print(f"Executável não encontrado: {exe_path}")
+        return False
+    try:
+        subprocess.Popen([exe_path])
+        return True
+    except Exception as e:
+        print(f"Erro ao executar app: {e}")
+        return False
 
-        installer_path = os.path.join(os.path.expanduser("~"), "setup_update.exe")
+class UpdateDialog(QDialog):
+    def __init__(self, latest_version):
+        super().__init__()
+        self.setWindowTitle("Atualização disponível")
+        self.setModal(True)
+        self.latest_version = latest_version
+        self.init_ui()
 
-        try:
-            print("Baixando instalador da atualização...")
-            urllib.request.urlretrieve(installer_url, installer_path)
-        except Exception as e:
-            print(f"Erro ao baixar o instalador: {e}")
+    def init_ui(self):
+        vbox = QVBoxLayout()
+
+        label = QLabel(f"Nova versão disponível: {self.latest_version}\nDeseja atualizar agora?")
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        vbox.addWidget(label)
+
+        btn_update = QPushButton("Atualizar")
+        btn_cancel = QPushButton("Ignorar")
+
+        btn_update.clicked.connect(self.accept)
+        btn_cancel.clicked.connect(self.reject)
+
+        vbox.addWidget(btn_update)
+        vbox.addWidget(btn_cancel)
+
+        self.setLayout(vbox)
+
+class LauncherWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Launcher")
+        self.setFixedSize(400, 300)
+        self.latest_version = None
+
+        # Remove bordas e barra de título
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
+        # Permite fundo transparente
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+        self.init_ui()
+        self.center()
+
+        # Aguarda 2 segundos antes de verificar a versão
+        QTimer.singleShot(2000, self.check_version)
+
+    def init_ui(self):
+        vbox = QVBoxLayout()
+        vbox.setContentsMargins(0, 0, 0, 0)
+        vbox.setSpacing(10)
+
+        self.setStyleSheet("background-color: transparent;")  # <== Adicione esta linha
+
+        self.logo_label = QLabel()
+        self.logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        logo_path = LOGO_PNG_PATH
+        if os.path.isfile(logo_path):
+            pixmap = QPixmap(logo_path).scaled(200, 200, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            self.logo_label.setPixmap(pixmap)
+        else:
+            self.logo_label.setText("Logo")
+
+        vbox.addWidget(self.logo_label)
+
+        self.status_label = QLabel("Verificando atualizações...")
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status_label.setStyleSheet("color: white; font-size: 14px;")
+        vbox.addWidget(self.status_label)
+
+        self.setLayout(vbox)
+
+    def center(self):
+        frame_geom = self.frameGeometry()
+        screen = QApplication.primaryScreen()
+        screen_center = screen.availableGeometry().center()
+        frame_geom.moveCenter(screen_center)
+        self.move(frame_geom.topLeft())
+
+    def check_version(self):
+        self.thread = VersionCheckThread()
+        self.thread.finished_check.connect(self.on_version_checked)
+        self.thread.start()
+
+    def on_version_checked(self, latest_version):
+        self.latest_version = latest_version
+
+        if latest_version is None:
+            self.status_label.setText("Erro ao verificar atualizações. Abrindo app...")
+            self.open_main_and_close()
             return
 
-        try:
-            print("Executando instalador...")
-            subprocess.Popen([installer_path, "/VERYSILENT", "/NORESTART"])
-        except Exception as e:
-            print(f"Erro ao executar instalador: {e}")
-            return
+        self.status_label.setText(f"Versão atual: {LOCAL_VERSION}\nÚltima versão: {latest_version}")
 
-        print("Atualização iniciada. Fechando o programa para atualizar.")
-        sys.exit()
+        if latest_version != LOCAL_VERSION:
+            dlg = UpdateDialog(latest_version)
+            if dlg.exec() == QDialog.DialogCode.Accepted:
+                self.status_label.setText("Baixando e instalando atualização...")
+                QApplication.processEvents()
+                installer = download_installer(latest_version)
+                if installer and run_installer_silently(installer):
+                    self.status_label.setText("Atualização concluída. Abrindo app...")
+                    self.open_main_and_close()
+                else:
+                    self.status_label.setText("Falha na atualização. Abrindo app antigo...")
+                    self.open_main_and_close()
+            else:
+                self.status_label.setText("Atualização ignorada. Abrindo app antigo...")
+                self.open_main_and_close()
+        else:
+            self.status_label.setText("App atualizado. Abrindo app...")
+            self.open_main_and_close()
+
+    def open_main_and_close(self):
+        # Fecha o launcher e abre a janela principal
+        self.close()
+        self.main_window = BudgetGenerator()
+        self.main_window.show()
 
 
 class BudgetGenerator(QWidget):
@@ -864,12 +995,10 @@ class BudgetGenerator(QWidget):
     def format_currency(self, value: float) -> str:
         return f"R$ {value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-
 if __name__ == "__main__":
-    check_update_and_apply()  # Verifica e atualiza se houver versão nova
-
     app = QApplication(sys.argv)
 
+    # Estilo do app principal (BudgetGenerator)
     app.setStyleSheet("""
         QWidget {
             background-color: #f0f4f8;
@@ -907,6 +1036,7 @@ if __name__ == "__main__":
         }
     """)
 
-    window = BudgetGenerator()
-    window.show()
+    launcher = LauncherWindow()
+    launcher.show()
+
     sys.exit(app.exec())
